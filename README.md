@@ -7,7 +7,7 @@
 </h2>
 
 <p align="center">
-<p align="center">Open Source Gen-AI + Enterprise Search.</p>
+<p align="center">Open Source Gen-AI + Enterprise Search -- Kunal's Version.</p>
 
 <p align="center">
 <a href="https://docs.onyx.app/" target="_blank">
