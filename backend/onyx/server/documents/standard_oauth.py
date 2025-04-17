@@ -82,7 +82,6 @@ def _get_additional_kwargs(
 class AuthorizeResponse(BaseModel):
     redirect_url: str
 
-
 @router.get("/authorize/{source}")
 def oauth_authorize(
     request: Request,
@@ -106,7 +105,7 @@ def oauth_authorize(
     additional_kwargs = _get_additional_kwargs(
         request, connector_cls, ["desired_return_url"]
     )
-
+    print("HERE")
     # store state in redis
     if not desired_return_url:
         desired_return_url = f"{base_url}/admin/connectors/{source}?step=0"

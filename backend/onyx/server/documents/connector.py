@@ -3,7 +3,7 @@ import os
 import uuid
 import zipfile
 from io import BytesIO
-from typing import cast
+from typing import Annotated, cast
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -30,6 +30,7 @@ from onyx.configs.constants import OnyxCeleryPriority
 from onyx.configs.constants import OnyxCeleryTask
 from onyx.connectors.exceptions import ConnectorValidationError
 from onyx.connectors.factory import validate_ccpair_for_user
+from onyx.key_value_store.factory import get_kv_store
 from onyx.connectors.google_utils.google_auth import (
     get_google_oauth_creds,
 )
@@ -1149,15 +1150,25 @@ def gmail_callback(
 def google_drive_callback(
     request: Request,
     callback: GDriveCallback = Depends(),
+    credential_id_from_query: Annotated[int | None, Query(alias="credential_id")] = None,
     user: User = Depends(current_user),
     db_session: Session = Depends(get_session),
 ) -> StatusResponse:
+    credential_id_from_query = get_kv_store().load(callback.state)
+    logger.debug(f"credential_id_from_query: {credential_id_from_query}, {type(credential_id_from_query)}")
+    credential_id_from_query = int(credential_id_from_query) if credential_id_from_query else None
     credential_id_cookie = request.cookies.get(_GOOGLE_DRIVE_CREDENTIAL_ID_COOKIE_NAME)
-    if credential_id_cookie is None or not credential_id_cookie.isdigit():
-        raise HTTPException(
-            status_code=401, detail="Request did not pass CSRF verification."
-        )
-    credential_id = int(credential_id_cookie)
+    logger.info(f"Cookie '{_GOOGLE_DRIVE_CREDENTIAL_ID_COOKIE_NAME}' value: {credential_id_cookie}") # ADD THIS
+    if (credential_id_cookie is None or not credential_id_cookie.isdigit()):
+        if credential_id_from_query is None:
+            logger.error("CSRF Verification Failed: Cookie or credential_id missing or invalid.") # ADD THIS
+            raise HTTPException(
+                status_code=401, detail="Request did not pass CSRF verification."
+            )
+        else:
+            credential_id = credential_id_from_query
+    else:
+        credential_id = int(credential_id_cookie)
     verify_csrf(credential_id, callback.state)
 
     credentials: Credentials | None = update_credential_access_tokens(
@@ -1172,7 +1183,7 @@ def google_drive_callback(
         raise HTTPException(
             status_code=500, detail="Unable to fetch Google Drive access tokens"
         )
-
+    get_kv_store().delete(callback.state)
     return StatusResponse(success=True, message="Updated Google Drive access tokens")
 
 

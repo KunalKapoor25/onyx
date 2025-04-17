@@ -180,6 +180,9 @@ def get_auth_url(credential_id: int, source: DocumentSource) -> str:
     get_kv_store().store(
         KV_CRED_KEY.format(credential_id), params.get("state", [None])[0], encrypt=True
     )  # type: ignore
+    get_kv_store().store(
+       params.get("state", [None])[0], credential_id, encrypt=True
+    )  # type: ignore
     return str(auth_url)
 
 

@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel
 from pydantic import model_validator
 
+from onyx.context.search.enums import LLMEvaluationType, SearchType
 from onyx.chat.models import PersonaOverrideConfig
 from onyx.chat.models import RetrievalDocs
 from onyx.configs.constants import DocumentSource
@@ -321,3 +322,14 @@ class ChatSearchRequest(BaseModel):
 
 class CreateChatResponse(BaseModel):
     chat_session_id: str
+
+class DocumentSearchRequest(ChunkContext):
+    message: str
+    search_type: SearchType
+    retrieval_options: RetrievalDetails
+    recency_bias_multiplier: float = 1.0
+    evaluation_type: LLMEvaluationType
+    # None to use system defaults for reranking
+    rerank_settings: RerankingDetails | None = None
+
+    

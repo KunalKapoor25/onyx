@@ -3,6 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from onyx.auth.users import current_curator_or_admin_user
@@ -11,10 +12,16 @@ from onyx.configs.constants import DocumentSource
 from onyx.configs.constants import MessageType
 from onyx.context.search.models import IndexFilters
 from onyx.context.search.models import SearchDoc
+from onyx.context.search.models import SearchRequest
+from onyx.context.search.models import SavedSearchDocWithContent
+from onyx.context.search.pipeline import SearchPipeline
 from onyx.context.search.preprocessing.access_filters import (
     build_access_filters_for_user,
 )
 from onyx.context.search.utils import chunks_or_sections_to_search_docs
+from onyx.context.search.utils import dedupe_documents
+from onyx.context.search.utils import relevant_sections_to_indices
+from onyx.context.search.utils import drop_llm_indices
 from onyx.db.chat import get_chat_messages_by_session
 from onyx.db.chat import get_chat_session_by_id
 from onyx.db.chat import get_chat_sessions_by_user
@@ -28,6 +35,7 @@ from onyx.db.search_settings import get_current_search_settings
 from onyx.db.tag import find_tags
 from onyx.document_index.factory import get_default_document_index
 from onyx.document_index.vespa.index import VespaIndex
+from onyx.llm.factory import get_default_llms
 from onyx.server.query_and_chat.models import AdminSearchRequest
 from onyx.server.query_and_chat.models import AdminSearchResponse
 from onyx.server.query_and_chat.models import ChatSessionDetails
@@ -35,6 +43,7 @@ from onyx.server.query_and_chat.models import ChatSessionsResponse
 from onyx.server.query_and_chat.models import SearchSessionDetailResponse
 from onyx.server.query_and_chat.models import SourceTag
 from onyx.server.query_and_chat.models import TagResponse
+from onyx.server.query_and_chat.models import DocumentSearchRequest
 from onyx.utils.logger import setup_logger
 from shared_configs.contextvars import get_current_tenant_id
 
@@ -43,6 +52,9 @@ logger = setup_logger()
 admin_router = APIRouter(prefix="/admin")
 basic_router = APIRouter(prefix="/query")
 
+class DocumentSearchResponse(BaseModel):
+    top_documents: list[SavedSearchDocWithContent]
+    llm_indices: list[int]
 
 @admin_router.post("/search")
 def admin_search(
@@ -227,3 +239,93 @@ def get_search_session(
         ],
     )
     return response
+
+
+@basic_router.post("/document-search")
+def handle_search_request(
+    search_request: DocumentSearchRequest,
+    user: User | None = Depends(current_user),
+    db_session: Session = Depends(get_session),
+) -> DocumentSearchResponse:
+    """Simple search endpoint, does not create a new message or records in the DB"""
+    query = search_request.message
+    logger.notice(f"Received document search query: {query}")
+
+    llm, fast_llm = get_default_llms()
+
+    search_pipeline = SearchPipeline(
+        search_request=SearchRequest(
+            query=query,
+            search_type=search_request.search_type,
+            human_selected_filters=search_request.retrieval_options.filters,
+            enable_auto_detect_filters=search_request.retrieval_options.enable_auto_detect_filters,
+            persona=None,  # For simplicity, default settings should be good for this search
+            offset=search_request.retrieval_options.offset,
+            limit=search_request.retrieval_options.limit,
+            rerank_settings=search_request.rerank_settings,
+            evaluation_type=search_request.evaluation_type,
+        ),
+        user=user,
+        llm=llm,
+        fast_llm=fast_llm,
+        skip_query_analysis=False,
+        db_session=db_session,
+        bypass_acl=False,
+    )
+
+    # Get reranked sections and relevance info
+    top_sections = search_pipeline.reranked_sections
+    relevance_sections = search_pipeline.section_relevance
+    
+    # Convert sections to docs format
+    top_docs = [
+        SavedSearchDocWithContent(
+            document_id=section.center_chunk.document_id,
+            chunk_ind=section.center_chunk.chunk_id,
+            content=section.center_chunk.content,
+            semantic_identifier=section.center_chunk.semantic_identifier or "Unknown",
+            link=(
+                section.center_chunk.source_links.get(0)
+                if section.center_chunk.source_links
+                else None
+            ),
+            blurb=section.center_chunk.blurb,
+            source_type=section.center_chunk.source_type,
+            boost=section.center_chunk.boost,
+            hidden=section.center_chunk.hidden,
+            metadata=section.center_chunk.metadata,
+            score=section.center_chunk.score or 0.0,
+            match_highlights=section.center_chunk.match_highlights,
+            updated_at=section.center_chunk.updated_at,
+            primary_owners=section.center_chunk.primary_owners,
+            secondary_owners=section.center_chunk.secondary_owners,
+            is_internet=False,
+            db_doc_id=0,
+        )
+        for section in top_sections
+    ]
+
+    # Deduplicate documents if requested
+    deduped_docs = top_docs
+    dropped_inds = None
+    if search_request.retrieval_options.dedupe_docs:
+        deduped_docs, dropped_inds = dedupe_documents(top_docs)
+
+    # Get indices of relevant sections
+    llm_indices = relevant_sections_to_indices(
+        relevance_sections=relevance_sections,
+        items=deduped_docs
+    )
+
+    # Update indices if documents were dropped during deduplication
+    if dropped_inds:
+        llm_indices = drop_llm_indices(
+            llm_indices=llm_indices,
+            search_docs=deduped_docs,
+            dropped_indices=dropped_inds,
+        )
+
+    return DocumentSearchResponse(
+        top_documents=deduped_docs, 
+        llm_indices=llm_indices
+    )
